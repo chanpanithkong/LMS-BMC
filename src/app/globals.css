@@ -169,6 +169,7 @@
     background: white !important;
   }
   .no-print,
+  [data-slot="sidebar"],
   [data-sonner-toaster] {
     display: none !important;
   }
@@ -177,9 +178,5 @@
     border: 0 !important;
     max-width: none !important;
     padding: 0 !important;
-  }
-  main {
-    padding: 0 !important;
-    overflow: visible !important;
   }
 }

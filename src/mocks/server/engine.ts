@@ -284,6 +284,77 @@ function scaleToPercent(value: bigint, places: number): string {
   return `${text.slice(0, -places)}.${text.slice(-places)}`;
 }
 
+export type PrepaymentOption = "REDUCE_TERM" | "REDUCE_INSTALLMENT";
+
+export interface PrepaymentInput {
+  terms: Terms;
+  /** Outstanding principal before the prepayment. */
+  balance: string;
+  amount: string;
+  date: string;
+  /** Start of the current interest period: the last due date, or the disbursement date. */
+  periodStart: string;
+  /** Scheduled dates of the installments not yet due, in order. */
+  dueDates: string[];
+  /** Current installment and principal amounts, kept when the term is reduced. */
+  regular: { total: string; principal: string };
+  option: PrepaymentOption;
+}
+
+/**
+ * Regenerates the remaining schedule after a partial prepayment (FR-CLS-004, SRS §10.6).
+ * Interest for the period in progress accrues on the old balance up to the prepayment date and on the new balance after it.
+ */
+export function revisePrepayment(p: PrepaymentInput, holidays: ReadonlySet<string> = new Set()): Omit<EngineInstallment, "no">[] {
+  const t = p.terms;
+  const interestOnly = t.amortisation === "INTEREST_ONLY";
+  if (t.interest_method !== "REDUCING" || !["EQUAL_INSTALLMENT", "EQUAL_PRINCIPAL", "INTEREST_ONLY"].includes(t.amortisation)) {
+    throw new EngineError("UNSUPPORTED_PREPAYMENT_METHOD", "Partial prepayment is available for reducing-balance installment and interest-only loans. Flat-rate and bullet loans need a contractual rule (V-01).");
+  }
+  if (interestOnly && p.option === "REDUCE_TERM") throw new EngineError("UNSUPPORTED_PREPAYMENT_OPTION", "Interest-only loans repay principal at maturity, so only the installment can be reduced.");
+  const unit = t.currency === "KHR" ? 100n : 1n;
+  const round = (v: Rational) => roundHalfUp(v, unit);
+  const annual = rdiv(ratFrom(t.annual_rate), rat(100n));
+  const i = rdiv(annual, rat(PERIODS[t.frequency === "AT_MATURITY" ? "MONTHLY" : t.frequency]));
+  const periodic = t.day_count === "30/360";
+  const before = toCents(p.balance);
+  let balance = before - toCents(p.amount);
+  const count = p.dueDates.length;
+
+  const firstInterest = () => {
+    const next = p.dueDates[0];
+    if (periodic) {
+      const weight = rat(BigInt(days30360(p.periodStart, p.date)), BigInt(days30360(p.periodStart, next)));
+      return round(rmul(radd(rmul(centsRat(before), weight), rmul(centsRat(balance), rsub(rat(1n), weight))), i));
+    }
+    return round(rmul(annual, radd(rmul(centsRat(before), actualFraction(t, p.periodStart, p.date)), rmul(centsRat(balance), actualFraction(t, p.date, next)))));
+  };
+  const periodInterest = (amount: bigint, from: string, to: string) => round(periodic ? rmul(centsRat(amount), i) : rmul(rmul(centsRat(amount), annual), actualFraction(t, from, to)));
+
+  let installment = toCents(p.regular.total);
+  let principalEach = toCents(p.regular.principal);
+  if (p.option === "REDUCE_INSTALLMENT") {
+    const annuity = i.n === 0n ? rdiv(centsRat(balance), rat(BigInt(count))) : rdiv(rmul(centsRat(balance), i), rsub(rat(1n), rdiv(rat(1n), rpow(radd(rat(1n), i), count))));
+    const increment = t.rounding_increment ? toCents(t.rounding_increment) : 0n;
+    installment = increment ? roundUp(annuity, increment) : round(annuity);
+    principalEach = round(rdiv(centsRat(balance), rat(BigInt(count))));
+  }
+
+  const rows: Omit<EngineInstallment, "no">[] = [];
+  let from = p.periodStart;
+  for (let k = 0; k < count && balance > 0n; k++) {
+    const due = p.dueDates[k];
+    const interest = k === 0 ? firstInterest() : periodInterest(balance, from, due);
+    let principal = interestOnly ? 0n : t.amortisation === "EQUAL_INSTALLMENT" ? installment - interest : principalEach;
+    if (k === count - 1 || principal >= balance) principal = balance;
+    if (principal <= 0n && !interestOnly) throw new EngineError("VALIDATION_FAILED", "The revised installment does not cover interest for these terms.");
+    rows.push({ due_date: due, payment_due_date: adjustBusinessDay(due, holidays), days: periodic ? days30360(from, due) : daysBetween(from, due), opening: fromCents(balance), principal: fromCents(principal), interest: fromCents(interest), total: fromCents(principal + interest), closing: fromCents(balance - principal) });
+    balance -= principal;
+    from = due;
+  }
+  return rows;
+}
+
 /** Settlement interest for option A (SRS §10.7, example E13). */
 export function accruedInterest(balance: string, t: Terms, from: string, to: string): string {
   const annual = rdiv(ratFrom(t.annual_rate), rat(100n));

@@ -63,7 +63,7 @@ export interface LoanTransaction extends Row { id: string; txn_type: string; com
 
 export interface SchedulePreview { installments: { no: number; due_date: string; payment_due_date: string; days: number; opening: string; principal: string; interest: string; total: string; closing: string }[]; total_principal: string; total_interest: string; total_payment: string; regular_installment: string; maturity_date: string; effective_rate_per_period: string; effective_rate_nominal_annual: string; engine_version: string; warnings: string[] }
 
-export interface Allocation { installment_no: number; component: string; amount: string; sequence_no: number }
+export interface Allocation { installment_no: number | null; component: string; amount: string; sequence_no: number }
 export interface Repayment extends Row {
   id: string; receipt_no: string; loan_id: string; loan_account_no: string; borrower_id: string; borrower_name: string; branch_id: string; branch_name: string; amount: string; currency: CurrencyCode; payment_date: string; value_date: string; method: string; external_reference: string | null; comment: string; status: string; unapplied_amount: string; allocations: Allocation[]; cashier_name: string; created_at: string; reversal: { at: string; by: string; reason: string } | null; print_count: number;
 }

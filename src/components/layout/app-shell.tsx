@@ -1,17 +1,17 @@
 "use client";
 import { useQuery } from "@tanstack/react-query";
-import { Bell, ChevronDown, Globe, Landmark, LogOut, Menu, Moon, RotateCcw, Search, Sun, UserRound } from "lucide-react";
+import { Bell, ChevronDown, Globe, Landmark, LogOut, Moon, RotateCcw, Search, Sun, UserRound } from "lucide-react";
 import { useTheme } from "next-themes";
 import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
-import { useEffect, useMemo, useState, type ReactNode } from "react";
+import { useEffect, useMemo, useState, type CSSProperties, type ReactNode } from "react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@/components/ui/collapsible";
 import { Command, CommandEmpty, CommandGroup, CommandInput, CommandItem, CommandList } from "@/components/ui/command";
 import { Dialog, DialogContent, DialogDescription, DialogTitle } from "@/components/ui/dialog";
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuLabel, DropdownMenuSeparator, DropdownMenuSub, DropdownMenuSubContent, DropdownMenuSubTrigger, DropdownMenuTrigger } from "@/components/ui/dropdown-menu";
-import { Sheet, SheetContent, SheetTitle } from "@/components/ui/sheet";
+import { Sidebar, SidebarContent, SidebarGroup, SidebarGroupContent, SidebarGroupLabel, SidebarHeader, SidebarInset, SidebarMenu, SidebarMenuButton, SidebarMenuItem, SidebarProvider, SidebarRail, SidebarTrigger, useSidebar } from "@/components/ui/sidebar";
 import { Breadcrumbs } from "@/components/shared/page";
 import { UserAvatar } from "@/components/shared/display";
 import { AccessDeniedState, LoadingSkeleton } from "@/components/shared/states";
@@ -26,34 +26,47 @@ import { useLocale, useT } from "@/lib/i18n/store";
 import { landingRoute, ROLE_NAMES, ROLES, type RoleCode } from "@/lib/permissions";
 import { cn } from "@/lib/utils";
 
-function SidebarNav({ onNavigate }: { onNavigate?: () => void }) {
+function SidebarNav() {
   const pathname = usePathname();
   const can = useCan();
   const t = useT();
+  const { isMobile, setOpenMobile } = useSidebar();
   const groups = useMemo(() => NAVIGATION.map((g) => ({ ...g, items: g.items.filter((i) => can(...i.perms)) })).filter((g) => g.items.length), [can]);
   const allHrefs = useMemo(() => groups.flatMap((g) => g.items.map((i) => i.href)), [groups]);
   const activeHref = allHrefs.filter((h) => pathname === h || pathname.startsWith(`${h}/`)).sort((a, b) => b.length - a.length)[0];
   const activeGroup = groups.find((g) => g.items.some((i) => i.href === activeHref))?.label;
   const [closed, setClosed] = useState<Record<string, boolean>>({});
   return (
-    <nav className="space-y-1 p-2" aria-label={t("Main navigation")}>
+    <nav aria-label={t("Main navigation")}>
       {groups.map((g) => {
         const open = closed[g.label] === undefined ? g.label === activeGroup || groups.length <= 4 : !closed[g.label];
         return (
           <Collapsible key={g.label} open={open} onOpenChange={(next) => setClosed((c) => ({ ...c, [g.label]: !next }))}>
-            <CollapsibleTrigger className="flex w-full items-center justify-between rounded-md px-2 py-1.5 text-[11px] font-semibold uppercase tracking-wide text-muted-foreground hover:bg-sidebar-accent/60">
-              {t(g.label)}<ChevronDown className={cn("size-3.5 transition-transform", !open && "-rotate-90")} aria-hidden />
-            </CollapsibleTrigger>
-            <CollapsibleContent className="space-y-0.5 pb-1">
-              {g.items.map((item) => {
-                const active = item.href === activeHref;
-                return (
-                  <Link key={item.href} href={item.href} onClick={onNavigate} aria-current={active ? "page" : undefined} className={cn("flex items-center gap-2 rounded-md px-2 py-1.5 text-sm transition-colors", active ? "bg-sidebar-accent font-medium text-sidebar-accent-foreground" : "text-sidebar-foreground hover:bg-sidebar-accent/60")}>
-                    <item.icon className="size-4 shrink-0" aria-hidden /><span className="truncate">{t(item.label)}</span>
-                  </Link>
-                );
-              })}
-            </CollapsibleContent>
+            <SidebarGroup className="py-1">
+              <SidebarGroupLabel asChild>
+                <CollapsibleTrigger className="w-full justify-between">
+                  {t(g.label)}<ChevronDown className={cn("transition-transform", !open && "-rotate-90")} aria-hidden />
+                </CollapsibleTrigger>
+              </SidebarGroupLabel>
+              <CollapsibleContent>
+                <SidebarGroupContent>
+                  <SidebarMenu>
+                    {g.items.map((item) => {
+                      const active = item.href === activeHref;
+                      return (
+                        <SidebarMenuItem key={item.href}>
+                          <SidebarMenuButton asChild isActive={active}>
+                            <Link href={item.href} aria-current={active ? "page" : undefined} onClick={() => { if (isMobile) setOpenMobile(false); }}>
+                              <item.icon aria-hidden /><span>{t(item.label)}</span>
+                            </Link>
+                          </SidebarMenuButton>
+                        </SidebarMenuItem>
+                      );
+                    })}
+                  </SidebarMenu>
+                </SidebarGroupContent>
+              </CollapsibleContent>
+            </SidebarGroup>
           </Collapsible>
         );
       })}
@@ -64,10 +77,16 @@ function SidebarNav({ onNavigate }: { onNavigate?: () => void }) {
 function Brand() {
   const t = useT();
   return (
-    <Link href="/" className="flex h-14 shrink-0 items-center gap-2 border-b px-4">
-      <span className="flex size-8 items-center justify-center rounded-md bg-primary text-primary-foreground"><Landmark className="size-4" aria-hidden /></span>
-      <span className="text-sm font-semibold leading-tight">{t("Loan Management System")}</span>
-    </Link>
+    <SidebarMenu>
+      <SidebarMenuItem>
+        <SidebarMenuButton asChild size="lg">
+          <Link href="/">
+            <span className="flex aspect-square size-8 items-center justify-center rounded-md bg-primary text-primary-foreground"><Landmark className="size-4" aria-hidden /></span>
+            <span className="truncate font-semibold">{t("Loan Management System")}</span>
+          </Link>
+        </SidebarMenuButton>
+      </SidebarMenuItem>
+    </SidebarMenu>
   );
 }
 
@@ -188,37 +207,51 @@ function RouteGuard({ children }: { children: ReactNode }) {
   return <>{children}</>;
 }
 
+const MENU_HIDDEN_KEY = "lms-menu-hidden";
+
+function readMenuOpen() {
+  try {
+    return localStorage.getItem(MENU_HIDDEN_KEY) !== "1";
+  } catch {
+    return true;
+  }
+}
+
 export function AppShell({ children }: { children: ReactNode }) {
   const t = useT();
   const router = useRouter();
   const status = useAuth((s) => s.status);
   const bootstrap = useAuth((s) => s.bootstrap);
-  const [mobileOpen, setMobileOpen] = useState(false);
+  const [menuOpen, setMenuOpen] = useState(readMenuOpen);
+  const changeMenu = (open: boolean) => {
+    setMenuOpen(open);
+    try {
+      localStorage.setItem(MENU_HIDDEN_KEY, open ? "0" : "1");
+    } catch {
+      /* The choice just won't be remembered. */
+    }
+  };
   useEffect(() => { void bootstrap(); }, [bootstrap]);
   useEffect(() => { if (status === "anonymous") router.replace("/login"); }, [status, router]);
   if (status !== "authenticated") return <div className="mx-auto max-w-md pt-24"><LoadingSkeleton rows={4} /></div>;
   return (
-    <div className="flex h-dvh overflow-hidden">
-      <aside className="no-print hidden w-64 shrink-0 flex-col border-r bg-sidebar lg:flex">
-        <Brand /><div className="min-h-0 flex-1 overflow-y-auto"><SidebarNav /></div>
-      </aside>
-      <Sheet open={mobileOpen} onOpenChange={setMobileOpen}>
-        <SheetContent side="left" className="w-72 gap-0 bg-sidebar p-0">
-          <SheetTitle className="sr-only">{t("Main navigation")}</SheetTitle>
-          <Brand /><div className="min-h-0 flex-1 overflow-y-auto"><SidebarNav onNavigate={() => setMobileOpen(false)} /></div>
-        </SheetContent>
-      </Sheet>
-      <div className="flex min-w-0 flex-1 flex-col">
-        <header className="no-print flex h-14 shrink-0 items-center gap-2 border-b bg-card px-3 sm:px-4">
-          <Button variant="ghost" size="icon" className="lg:hidden" aria-label={t("Open navigation")} onClick={() => setMobileOpen(true)}><Menu className="size-5" /></Button>
+    <SidebarProvider open={menuOpen} onOpenChange={changeMenu} className="print:bg-white" style={{ "--sidebar-width": "calc(var(--spacing) * 72)" } as CSSProperties}>
+      <Sidebar collapsible="offcanvas" variant="inset">
+        <SidebarHeader><Brand /></SidebarHeader>
+        <SidebarContent><SidebarNav /></SidebarContent>
+        <SidebarRail />
+      </Sidebar>
+      <SidebarInset className="h-svh overflow-hidden md:h-[calc(100svh-1rem)] print:h-auto print:overflow-visible md:peer-data-[variant=inset]:print:m-0 md:peer-data-[variant=inset]:print:rounded-none md:peer-data-[variant=inset]:print:shadow-none">
+        <header className="no-print flex h-14 shrink-0 items-center gap-2 border-b px-3 sm:px-4">
+          <SidebarTrigger className="-ml-1" aria-label={t("Toggle menu")} title={t("Toggle menu")} />
           <GlobalSearch />
           <div className="ml-auto flex items-center gap-1"><LanguageSwitcher /><ThemeToggle /><NotificationBell /><UserMenu /></div>
         </header>
         {API_MODE === "mock" && <div className="no-print border-b border-warning/30 bg-warning-soft px-4 py-1 text-center text-xs text-warning">{t("Demonstration mode: all data and financial results are simulated by a mock API.")}</div>}
-        <main className="min-w-0 flex-1 overflow-y-auto p-4 sm:p-6">
+        <div className="min-w-0 flex-1 overflow-y-auto p-4 sm:p-6 print:overflow-visible print:p-0">
           <div className="mx-auto max-w-[1500px] space-y-4"><Breadcrumbs /><RouteGuard>{children}</RouteGuard></div>
-        </main>
-      </div>
-    </div>
+        </div>
+      </SidebarInset>
+    </SidebarProvider>
   );
 }

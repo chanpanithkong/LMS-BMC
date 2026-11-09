@@ -2,7 +2,7 @@
  * Checks the demonstration engine against the verified examples in SRS §10.9.
  * Run: npm run verify:engine
  */
-import { accruedInterest, generateSchedule, penaltyInterest, type Terms } from "../src/mocks/server/engine";
+import { accruedInterest, generateSchedule, penaltyInterest, revisePrepayment, type PrepaymentOption, type Terms } from "../src/mocks/server/engine";
 
 const base: Terms = {
   principal: "1200.00", currency: "USD", annual_rate: "18", interest_method: "REDUCING", amortisation: "EQUAL_INSTALLMENT",
@@ -71,6 +71,15 @@ check("E14 penalty on installment", penaltyInterest("110.02", "0.1", 7), "0.77")
 check("E14 penalty on principal", penaltyInterest("92.02", "0.1", 7), "0.64");
 check("Flat + equal principal rejected", (() => { try { generateSchedule({ ...base, interest_method: "FLAT", amortisation: "EQUAL_PRINCIPAL" }); return ""; } catch (e) { return (e as { code: string }).code; } })(), "UNSUPPORTED_METHOD_COMBINATION");
 void interests;
+
+// Partial prepayment of 200.00 on E1 after installment 3. Expected values come from an independent Decimal calculation.
+const after3 = e1.installments.slice(3);
+const prepay = (option: PrepaymentOption, date: string) => revisePrepayment({ terms: base, balance: "919.78", amount: "200.00", date, periodStart: "2027-04-05", dueDates: after3.map((r) => r.due_date), regular: { total: after3[0].total, principal: after3[0].principal }, option });
+const shape = (rows: ReturnType<typeof prepay>) => [rows.length, rows[0].total, rows[0].interest, rows[rows.length - 1].total, rows[rows.length - 1].principal, rows.reduce((s, r) => s + BigInt(r.interest.replace(".", "")), BigInt(0)).toString(), rows[rows.length - 1].closing];
+check("Prepayment on due date, reduce term", shape(prepay("REDUCE_TERM", "2027-04-05")), [7, "110.02", "10.80", "103.20", "101.67", "4354", "0.00"]);
+check("Prepayment on due date, reduce installment", shape(prepay("REDUCE_INSTALLMENT", "2027-04-05")), [9, "86.09", "10.80", "86.13", "84.86", "5507", "0.00"]);
+check("Prepayment 15 days in, reduce term", shape(prepay("REDUCE_TERM", "2027-04-20")), [7, "110.02", "12.30", "104.83", "103.28", "4517", "0.00"]);
+check("Prepayment 15 days in, reduce installment", shape(prepay("REDUCE_INSTALLMENT", "2027-04-20")), [9, "86.09", "12.30", "87.81", "86.51", "5675", "0.00"]);
 
 console.log(failed ? `\n${failed} check(s) failed` : "\nAll engine checks passed");
 process.exit(failed ? 1 : 0);

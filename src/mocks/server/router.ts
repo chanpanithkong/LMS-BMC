@@ -3,12 +3,12 @@
  */
 import { createHash, randomUUID } from "node:crypto";
 import { add, cmp, fromCents, isPositive, isZero, min, percent, rat, rdiv, rmul, roundHalfUp, ratFrom, sub } from "./decimal";
-import { accruedInterest, addDays, EngineError, generateSchedule, type Terms } from "./engine";
+import { accruedInterest, addDays, EngineError, generateSchedule, revisePrepayment, type Terms } from "./engine";
 import { dashboard, REPORTS, runReport, scoped, trialBalance, type Params } from "./reports";
 import { DEMO_MFA, DEMO_PASSWORD, ensureSeeded, seed } from "./seed";
 import {
-  activeSchedule, applyRepayment, asInstallments, assertState, audit, balances, buildSchedule, cashAccount, ctxFor, dpdOf, find, inScope, need, nextSeq, notify, nowIso, outstandingPrincipal, pad, Problem, postJournal, postTxn,
-  allocate, refreshInstallments, requireReason, reverseRepayment, sod, state, summary, table, today, uid, validation, type Ctx, type Installment, type Row,
+  activeSchedule, applyPrepayment, applyRepayment, asInstallments, assertState, audit, balances, buildSchedule, cashAccount, ctxFor, dpdOf, find, holidays, inScope, need, nextSeq, notify, nowIso, outstandingPrincipal, pad, Problem, postJournal, postTxn,
+  allocate, refreshInstallments, requireReason, reverseRepayment, sod, state, summary, table, today, uid, unpaid, validation, type Ctx, type Installment, type Row,
 } from "./store";
 import { landingRoute, PERMISSION_GROUPS, ROLE_NAMES, ROLE_PERMISSIONS, ROLES, type Permission, type RoleCode } from "@/lib/permissions";
 
@@ -468,7 +468,7 @@ post("/loans/:id/repayments", (ctx, req, id) => {
 });
 post("/repayments/:id/reversal-requests", (ctx, req, id) => { need(ctx, "repayment.reverse_request"); const r = rowOr404(ctx, "repayments", id); assertState(r.status, ["COMPLETED"]); if (table("reversal_requests").some((x) => x.repayment_id === id && x.status === "PENDING")) throw new Problem(409, "REVERSAL_ALREADY_REQUESTED", "A reversal request is already pending."); const reason = requireReason(req.body); const row = { id: uid("rev"), repayment_id: r.id, receipt_no: r.receipt_no, loan_id: r.loan_id, loan_account_no: r.loan_account_no, borrower_name: r.borrower_name, branch_id: r.branch_id, amount: r.amount, currency: r.currency, reason_code: req.body.reason_code, reason, status: "PENDING", requested_by: ctx.user.id, requested_by_name: ctx.user.name, original_cashier: r.cashier_id, created_at: nowIso() }; table("reversal_requests").unshift(row); audit(ctx, "REVERSAL_REQUESTED", "Repayments", r.receipt_no, "COMPLETED", "PENDING REVERSAL", reason, true); notify("Repayments", "Reversal request pending", `${r.receipt_no}: ${reason}`, `/repayments/reversals/${row.id}`, r.branch_id, "HIGH"); return ok(row, 201); });
 on("GET", "/reversal-requests/:id", (ctx, _r, id) => { need(ctx, "repayment.view"); const x = rowOr404(ctx, "reversal_requests", id); return ok({ ...x, repayment: find("repayments", x.repayment_id) }); });
-post("/reversal-requests/:id/approve", (ctx, req, id) => { need(ctx, "repayment.reverse_approve"); const x = rowOr404(ctx, "reversal_requests", id); assertState(x.status, ["PENDING"]); sod(ctx, x.requested_by, "approve"); sod(ctx, x.original_cashier, "approve the reversal of"); const r = find("repayments", x.repayment_id)!; const loan = find("loans", x.loan_id)!; reverseRepayment(loan, r, x.reason, ctx); x.status = "APPROVED"; x.approved_by_name = ctx.user.name; x.approved_at = nowIso(); table("control_exceptions").unshift({ id: uid("ce"), type: "Reversal", reference: r.receipt_no, user: ctx.user.name, at: nowIso(), detail: x.reason, severity: "MEDIUM", status: "OPEN", branch_id: loan.branch_id }); audit(ctx, "REVERSAL_APPROVED", "Repayments", r.receipt_no, "COMPLETED", "REVERSED", req.body.comment ?? x.reason, true); return ok({ ...x, simulated: true }); });
+post("/reversal-requests/:id/approve", (ctx, req, id) => { need(ctx, "repayment.reverse_approve"); const x = rowOr404(ctx, "reversal_requests", id); assertState(x.status, ["PENDING"]); sod(ctx, x.requested_by, "approve"); sod(ctx, x.original_cashier, "approve the reversal of"); const r = find("repayments", x.repayment_id)!; const loan = find("loans", x.loan_id)!; if (r.kind === "PREPAYMENT" && table("repayments").some((p) => p.loan_id === r.loan_id && p.id !== r.id && p.status === "COMPLETED" && p.created_at > r.created_at)) throw new Problem(409, "LATER_PAYMENTS_EXIST", "Reverse the later payments on this loan before reversing the prepayment."); reverseRepayment(loan, r, x.reason, ctx); x.status = "APPROVED"; x.approved_by_name = ctx.user.name; x.approved_at = nowIso(); table("control_exceptions").unshift({ id: uid("ce"), type: "Reversal", reference: r.receipt_no, user: ctx.user.name, at: nowIso(), detail: x.reason, severity: "MEDIUM", status: "OPEN", branch_id: loan.branch_id }); audit(ctx, "REVERSAL_APPROVED", "Repayments", r.receipt_no, "COMPLETED", "REVERSED", req.body.comment ?? x.reason, true); return ok({ ...x, simulated: true }); });
 post("/reversal-requests/:id/reject", (ctx, req, id) => { need(ctx, "repayment.reverse_approve"); const x = rowOr404(ctx, "reversal_requests", id); assertState(x.status, ["PENDING"]); x.status = "REJECTED"; audit(ctx, "REVERSAL_REJECTED", "Repayments", x.receipt_no, "PENDING", "REJECTED", requireReason(req.body), true); return ok(x); });
 post("/loans/:id/refunds", (ctx, req, id) => { need(ctx, "repayment.reverse_request", "repayment.create"); const loan = loanOr404(ctx, id); const amount = decimal(req.body, "amount"); if (cmp(amount, balances(loan).unapplied) > 0) validation("amount", "Refund cannot exceed the unapplied balance."); const row = { id: uid("rfd"), loan_id: loan.id, loan_account_no: loan.account_no, borrower_name: loan.borrower_name, branch_id: loan.branch_id, amount, currency: loan.currency, method: req.body.method, status: "PENDING", requested_by: ctx.user.id, requested_by_name: ctx.user.name, reason: requireReason(req.body), created_at: nowIso() }; table("refunds").unshift(row); return ok(row, 201); });
 post("/refunds/:id/approve", (ctx, _r, id) => { need(ctx, "repayment.reverse_approve"); const x = rowOr404(ctx, "refunds", id); assertState(x.status, ["PENDING"]); sod(ctx, x.requested_by, "approve"); const loan = find("loans", x.loan_id)!; postTxn(loan, "REFUND", "UNAPPLIED", `-${x.amount}`, today(), x.id, ctx); postJournal({ description: `Refund of unapplied balance ${loan.account_no}`, date: today(), source_type: "REFUND", source_id: x.id, source_event: "REFUND", currency: loan.currency, branch_id: loan.branch_id, loan_id: loan.id, lines: [{ code: "2100", debit: x.amount }, { code: cashAccount(x.method), credit: x.amount }] }, ctx); x.status = "PAID"; audit(ctx, "REFUND_APPROVED", "Repayments", loan.account_no, "PENDING", "PAID", "", true); return ok(x); });
@@ -514,6 +514,45 @@ function executeModification(m: Row, ctx: Ctx) {
   loan.terms_versions.forEach((t: Row) => { t.status = "SUPERSEDED"; }); loan.terms_versions.push({ version_no: loan.terms_versions.length + 1, status: "EXECUTED", effective_from: m.effective_date, source: m.kind === "RESCHEDULING" ? "RESCHEDULE" : "RESTRUCTURE", annual_rate: m.proposed.annual_rate, term: m.proposed.term, frequency: m.proposed.frequency, interest_method: loan.terms.interest_method, amortisation: loan.terms.amortisation, day_count: loan.terms.day_count });
   loan.term = m.proposed.term; loan.annual_rate = m.proposed.annual_rate; loan.maturity_date = m.proposed.maturity_date; loan.restructure_count += 1; if (!loan.flags.includes(m.kind === "RESCHEDULING" ? "Rescheduled" : "Restructured")) loan.flags.push(m.kind === "RESCHEDULING" ? "Rescheduled" : "Restructured"); refreshInstallments(loan); void ctx;
 }
+
+function prepaymentPlan(ctx: Ctx, loan: Row, body: Row) {
+  assertState(loan.status, ["ACTIVE"]);
+  const amount = decimal(body, "amount");
+  const date = body.value_date || today();
+  const option = body.option === "REDUCE_INSTALLMENT" ? "REDUCE_INSTALLMENT" : "REDUCE_TERM";
+  const installments = activeSchedule(loan).installments as Installment[];
+  const paidThrough = installments.filter((i) => i.due_date <= date);
+  const remaining = installments.filter((i) => i.due_date > date);
+  const periodStart = paidThrough.length ? paidThrough[paidThrough.length - 1].due_date : loan.disbursed_on;
+  if (date > today()) validation("value_date", "Prepayment date cannot be in the future.");
+  if (date < periodStart) validation("value_date", "Prepayment date cannot be before the last due date.");
+  if (Math.round((Date.parse(today()) - Date.parse(date)) / 86_400_000) > 3 && !ctx.roles.includes("BRMGR")) throw new Problem(403, "BACKDATE_APPROVAL_REQUIRED", "Payments dated more than 3 days back require Branch Manager approval.", "Backdating approval required");
+  if (paidThrough.some((i) => isPositive(unpaid(i)))) throw new Problem(409, "AMOUNTS_DUE_OUTSTANDING", "Amounts already due must be paid before a partial prepayment. Record a repayment first.", "Amounts due outstanding");
+  if (!remaining.length) throw new Problem(409, "NO_REMAINING_INSTALLMENTS", "There are no future installments to revise.");
+  if (remaining.some((i) => isPositive(add(i.principal_paid, i.interest_paid)))) throw new Problem(409, "INSTALLMENT_PARTLY_PAID", "A future installment already has payments applied, so the schedule cannot be revised.");
+  const balance = outstandingPrincipal(loan, date);
+  if (cmp(amount, balance) >= 0) throw new Problem(422, "USE_FULL_SETTLEMENT", `A prepayment must be less than the outstanding principal of ${balance} ${loan.currency}. Use early settlement to repay in full.`, "Use early settlement", [{ field: "amount", code: "USE_FULL_SETTLEMENT", message: "Use early settlement to repay in full." }]);
+  const revised = revisePrepayment({ terms: loan.terms, balance, amount, date, periodStart, dueDates: remaining.map((i) => i.due_date), regular: { total: remaining[0].total, principal: remaining[0].principal }, option }, holidays());
+  const interestOf = (rows: { interest: string }[]) => rows.reduce((s, r) => add(s, r.interest), "0.00");
+  const existingInterest = interestOf(remaining), proposedInterest = interestOf(revised);
+  const first = paidThrough.length + 1;
+  return {
+    amount, date, option, revised, currency: loan.currency, new_principal: sub(balance, amount), interest_reduction: sub(existingInterest, proposedInterest),
+    existing: { outstanding_principal: balance, installment: remaining[0].total, remaining_installments: remaining.length, maturity_date: remaining[remaining.length - 1].due_date, remaining_interest: existingInterest },
+    proposed: { outstanding_principal: sub(balance, amount), installment: revised[0].total, remaining_installments: revised.length, maturity_date: revised[revised.length - 1].due_date, remaining_interest: proposedInterest },
+    proposed_installments: revised.map((r, k) => ({ ...r, no: first + k })), simulated: true,
+  };
+}
+on("POST", "/loans/:id/prepayments/preview", (ctx, req, id) => { need(ctx, "settlement.quote", "settlement.process"); const { revised: _r, ...plan } = prepaymentPlan(ctx, loanOr404(ctx, id), req.body); void _r; return ok(plan); });
+post("/loans/:id/prepayments", (ctx, req, id) => {
+  need(ctx, "settlement.process"); const loan = loanOr404(ctx, id); const plan = prepaymentPlan(ctx, loan, req.body); const method = req.body.method;
+  const session = table("cashier_sessions").find((s) => s.cashier_id === ctx.user.id && s.status === "OPEN");
+  if (method === "CASH" && ctx.roles.includes("CASHIER") && !session) throw new Problem(409, "CASHIER_SESSION_REQUIRED", "Open a cashier session before accepting cash.");
+  const ref = req.body.external_reference; if (ref && table("repayments").some((r) => r.external_reference === ref && r.status !== "REVERSED" && r.channel === "BRANCH")) throw new Problem(409, "DUPLICATE_REFERENCE", `Reference ${ref} has already been recorded for this channel.`, "Duplicate reference");
+  const r = applyPrepayment(loan, { amount: plan.amount, value_date: plan.date, method, external_reference: ref ?? null, session_id: session?.id ?? null, option: plan.option, remaining: plan.revised }, ctx); table("repayments").unshift(r);
+  audit(ctx, "PREPAYMENT_RECORDED", "Settlement", r.receipt_no, `Schedule v${r.superseded_schedule_version}`, `Schedule v${r.new_schedule_version}`, plan.option, true);
+  return ok({ ...r, balances: balances(loan), simulated: true }, 201);
+});
 
 // Settlement and closure
 on("GET", "/settlements/:id", (ctx, _r, id) => { need(ctx, "settlement.view"); return ok(rowOr404(ctx, "settlements", id)); });

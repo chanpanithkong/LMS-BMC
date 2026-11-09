@@ -138,6 +138,41 @@ check("Every posted journal balances", (get("acct", "/accounting/journals?limit=
 const closed = (get("acct", "/accounting/periods?limit=20").body.items as Body[]).find((p) => p.status === "CLOSED")!;
 expectCode("Closed period rejects journal", post("acct", "/accounting/journals", { description: "x", accounting_date: closed.start_date, currency: "USD", lines: [{ account_code: "1000", debit: "1.00" }, { account_code: "2000", credit: "1.00" }] }), 409, "PERIOD_CLOSED");
 
+// Partial prepayment (FR-CLS-004)
+const allLoans = get("owner", "/loans?status=ACTIVE&limit=200").body.items as Body[];
+const pre = allLoans.find((l) => l.branch_id === "br-pp1" && l.currency === "USD" && l.product_code === "PSL" && l.days_past_due === 0 && l.total_due_today === "0.00" && Number(l.outstanding_principal) > 100)!;
+const prePath = `/loans/${pre.id}/prepayments`;
+const preBody = { amount: "50.00", value_date: today, option: "REDUCE_TERM", method: "CASH" };
+const v1 = (get("owner", `/loans/${pre.id}/schedule`).body as Body);
+const plan = post("loanoff", `${prePath}/preview`, preBody).body;
+check("Prepayment preview is available to loan officers", Boolean(plan.proposed_installments?.length), plan);
+check("Reduce term keeps the installment and does not lengthen the schedule", plan.proposed.remaining_installments <= plan.existing.remaining_installments && plan.proposed.installment === plan.existing.installment, plan.proposed);
+const c2 = (v: string) => BigInt(v.replace(".", ""));
+check("Revised principal sums to the new balance", plan.proposed_installments.reduce((s: bigint, r: Body) => s + c2(r.principal), BigInt(0)) === c2(plan.new_principal), plan.new_principal);
+const inst = post("loanoff", `${prePath}/preview`, { ...preBody, option: "REDUCE_INSTALLMENT" }).body;
+check("Reduce installment keeps the count and lowers the installment", inst.proposed.remaining_installments === inst.existing.remaining_installments && c2(inst.proposed.installment) < c2(inst.existing.installment), inst.proposed);
+expectCode("Loan officer cannot record a prepayment", post("loanoff", prePath, preBody, "pp-0"), 403, "FORBIDDEN");
+expectCode("Full amount must use settlement", post("cashier", `${prePath}/preview`, { ...preBody, amount: pre.outstanding_principal }), 422, "USE_FULL_SETTLEMENT");
+expectCode("Overdue amounts block prepayment", post("cashier", `/loans/${late.id}/prepayments/preview`, preBody), 409, "AMOUNTS_DUE_OUTSTANDING");
+const flat = allLoans.find((l) => l.product_code === "EMP" && l.days_past_due === 0 && l.total_due_today === "0.00");
+if (flat) expectCode("Flat-rate loans need a contractual rule", post("owner", `/loans/${flat.id}/prepayments/preview`, preBody), 422, "UNSUPPORTED_PREPAYMENT_METHOD");
+const done = post("cashier", prePath, preBody, "pp-1");
+check("Prepayment recorded with receipt", done.status === 201 && done.body.kind === "PREPAYMENT", done);
+check("Prepayment is idempotent", post("cashier", prePath, preBody, "pp-1").body.id === done.body.id);
+const afterPre = get("owner", `/loans/${pre.id}`).body;
+check("Outstanding principal falls by the prepayment", c2(pre.outstanding_principal) - c2(afterPre.outstanding_principal) === c2("50.00"), afterPre.outstanding_principal);
+const v2 = get("owner", `/loans/${pre.id}/schedule`).body;
+check("Prepayment creates a new active schedule version", v2.version_no === v1.version_no + 1 && v2.reason === "PREPAYMENT" && v2.status === "ACTIVE", v2.version_no);
+check("Earlier schedule version stays readable and superseded", get("owner", `/loans/${pre.id}/schedule?version=${v1.version_no}`).body.status === "SUPERSEDED");
+const preJournal = (get("acct", "/accounting/journals?limit=200").body.items as Body[]).find((j) => j.source_id === done.body.id)!;
+check("Prepayment journal is Dr cash, Cr loans receivable", preJournal.lines.some((l: Body) => l.account_code === "1000" && l.debit === "50.00") && preJournal.lines.some((l: Body) => l.account_code === "1100" && l.credit === "50.00"), preJournal.lines);
+const preRev = post("acct", `/repayments/${done.body.id}/reversal-requests`, { reason_code: "OTHER", reason: "Test" }).body;
+post("brmgr", `/reversal-requests/${preRev.id}/approve`, {});
+const undone = get("owner", `/loans/${pre.id}`).body;
+check("Reversal restores outstanding principal", undone.outstanding_principal === pre.outstanding_principal, undone.outstanding_principal);
+const v3 = get("owner", `/loans/${pre.id}/schedule`).body;
+check("Reversal reinstates the schedule as a new version", v3.version_no === v2.version_no + 1 && v3.reason === "PREPAYMENT_REVERSAL" && v3.installments.length === v1.installments.length && v3.installments[v3.installments.length - 1].total === v1.installments[v1.installments.length - 1].total, v3.version_no);
+
 // Reports and audit
 const dash = get("owner", "/dashboards/management?currency=USD").body;
 const par = get("owner", "/reports/RPT-17?currency=USD").body;

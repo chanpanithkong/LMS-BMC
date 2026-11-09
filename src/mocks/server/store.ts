@@ -308,7 +308,7 @@ export function postJournal(input: { description: string; date: string; source_t
 }
 
 // ───── Repayment allocation ─────
-export interface Allocation { installment_no: number; component: "PENALTY" | "FEE" | "INTEREST" | "PRINCIPAL"; amount: string; sequence_no: number }
+export interface Allocation { installment_no: number | null; component: "PENALTY" | "FEE" | "INTEREST" | "PRINCIPAL"; amount: string; sequence_no: number }
 
 const COMPONENTS: { component: Allocation["component"]; due: keyof Installment; paid: keyof Installment }[] = [
   { component: "PENALTY", due: "penalty", paid: "penalty_paid" },
@@ -359,7 +359,7 @@ export function applyRepayment(loan: Row, input: { amount: string; value_date: s
   };
   for (const a of allocations) {
     const component = a.component === "INTEREST" ? "INTEREST_DUE" : a.component;
-    postTxn(loan, "REPAYMENT_ALLOCATION", component, `-${a.amount}`, input.value_date, repayment.receipt_no, ctx, a.installment_no);
+    postTxn(loan, "REPAYMENT_ALLOCATION", component, `-${a.amount}`, input.value_date, repayment.receipt_no, ctx, a.installment_no ?? undefined);
   }
   if (isPositive(unapplied)) postTxn(loan, "UNAPPLIED_IN", "UNAPPLIED", unapplied, input.value_date, repayment.receipt_no, ctx);
   const cr: Record<string, string> = {};
@@ -374,16 +374,54 @@ export function applyRepayment(loan: Row, input: { amount: string; value_date: s
   return repayment;
 }
 
+/** Records a partial prepayment: principal only, with the remaining schedule replaced by a new version. */
+export function applyPrepayment(loan: Row, input: { amount: string; value_date: string; method: string; external_reference?: string | null; session_id?: string | null; option: string; remaining: Omit<EngineInstallment, "no">[] }, ctx: Ctx) {
+  const current = activeSchedule(loan);
+  const carried = (current.installments as Installment[]).filter((i) => i.due_date <= input.value_date).map((i) => ({ ...i }));
+  const installments = [...carried, ...asInstallments(input.remaining.map((r, k) => ({ ...r, no: carried.length + k + 1 })))];
+  const version = Math.max(...loan.schedule_versions.map((s: Row) => s.version_no)) + 1;
+  current.status = "SUPERSEDED";
+  loan.schedule_versions.push({ version_no: version, status: "ACTIVE", reason: "PREPAYMENT", effective_from: input.value_date, engine_version: current.engine_version, total_principal: current.total_principal, total_interest: installments.reduce((s, i) => add(s, i.interest), "0.00"), installments });
+  loan.maturity_date = installments[installments.length - 1].due_date;
+  loan.term = installments.length;
+  const repayment = {
+    id: uid("RPY"), receipt_no: `${loan.branch_code}-R-${input.value_date.slice(0, 4)}-${pad(nextSeq(`receipt:${loan.branch_code}`))}`, kind: "PREPAYMENT", prepayment_option: input.option, superseded_schedule_version: current.version_no, new_schedule_version: version,
+    loan_id: loan.id, loan_account_no: loan.account_no, borrower_id: loan.borrower_id, borrower_name: loan.borrower_name, branch_id: loan.branch_id, branch_name: loan.branch_name, product_id: loan.product_id,
+    amount: input.amount, currency: loan.currency, payment_date: input.value_date, value_date: input.value_date, method: input.method, channel: "BRANCH", external_reference: input.external_reference ?? null, comment: "Partial prepayment",
+    status: "COMPLETED", unapplied_amount: "0.00", cashier_session_id: input.session_id ?? null, allocations: [{ installment_no: null, component: "PRINCIPAL", amount: input.amount, sequence_no: 1 }] as Allocation[],
+    cashier_id: ctx.user.id, cashier_name: ctx.user.name, created_at: nowIso(), reversal: null, print_count: 0,
+  };
+  postTxn(loan, "REPAYMENT_ALLOCATION", "PRINCIPAL", `-${input.amount}`, input.value_date, repayment.receipt_no, ctx);
+  postJournal({ description: `Partial prepayment ${repayment.receipt_no} — ${loan.account_no}`, date: input.value_date, source_type: "REPAYMENT", source_id: repayment.id, source_event: "REPAYMENT", currency: loan.currency, branch_id: loan.branch_id, loan_id: loan.id, lines: [{ code: cashAccount(input.method), debit: input.amount }, { code: "1100", credit: input.amount }] }, ctx);
+  refreshInstallments(loan);
+  return repayment;
+}
+
+/** Reversal of a prepayment reinstates the earlier schedule as a new version; superseded versions stay on record. */
+function restoreSchedule(loan: Row, repayment: Row) {
+  const previous = loan.schedule_versions.find((s: Row) => s.version_no === repayment.superseded_schedule_version);
+  const copy = structuredClone(previous);
+  activeSchedule(loan).status = "SUPERSEDED";
+  copy.version_no = Math.max(...loan.schedule_versions.map((s: Row) => s.version_no)) + 1;
+  copy.status = "ACTIVE";
+  copy.reason = "PREPAYMENT_REVERSAL";
+  copy.effective_from = today();
+  loan.schedule_versions.push(copy);
+  loan.maturity_date = copy.installments[copy.installments.length - 1].due_date;
+  loan.term = copy.installments.length;
+}
+
 /** Reverses a repayment, then re-allocates later payments in value-date order (SRS §11.7). */
 export function reverseRepayment(loan: Row, repayment: Row, reason: string, ctx: Ctx) {
   repayment.status = "REVERSED";
   repayment.reversal = { at: nowIso(), by: ctx.user.name, reason };
+  if (repayment.kind === "PREPAYMENT") restoreSchedule(loan, repayment);
   const schedule = activeSchedule(loan);
   for (const t of loan.transactions.filter((x: Row) => x.source_document === repayment.receipt_no && !x.reverses_txn_id)) {
     postTxn(loan, "REVERSAL", t.component, t.amount.startsWith("-") ? t.amount.slice(1) : `-${t.amount}`, t.value_date, `REV-${repayment.receipt_no}`, ctx, t.installment_no ?? undefined, t.id);
   }
   for (const ins of schedule.installments as Installment[]) Object.assign(ins, { principal_paid: "0.00", interest_paid: "0.00", fee_paid: "0.00", penalty_paid: "0.00" });
-  const remaining = table("repayments").filter((r) => r.loan_id === loan.id && r.status === "COMPLETED").sort((a, b) => a.value_date.localeCompare(b.value_date));
+  const remaining = table("repayments").filter((r) => r.loan_id === loan.id && r.status === "COMPLETED" && r.kind !== "PREPAYMENT").sort((a, b) => a.value_date.localeCompare(b.value_date));
   for (const r of remaining) {
     const result = allocate(schedule.installments, r.amount, r.value_date, true);
     r.allocations = result.allocations;

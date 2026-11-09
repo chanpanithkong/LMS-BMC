@@ -20,7 +20,7 @@ Status of the frontend against the brief and SRS LMS-SRS-001.
 | 10 | Loan accounts (LOAN) | ✅ | 9 tabs, schedule versions, ledger, as-of balances, statement. |
 | 11 | Delinquency and collection (COLL) | 🟡 | Dashboard, overdue list, contacts, promises, assignment, contact-hour check. Assignment is manual; automatic escalation is not built. |
 | 12 | Rescheduling and restructuring (RST) | 🟡 | Requests, side-by-side terms, approval, signing, execution, history. Refinancing not built. |
-| 13 | Settlement and closure (CLS) | 🟡 | Quote, settlement, closure with zero-balance check, history. **Partial prepayment not built.** Quotes use option A only in the mock. |
+| 13 | Settlement and closure (CLS) | 🟡 | Quote, settlement, partial prepayment (reduce term or installment, new schedule version), closure with zero-balance check, history. Quotes use option A only in the mock. |
 | 14 | Fees and penalties (PEN) | 🟡 | Rule configuration, transactions, waivers. Charges are seeded, because end-of-day is not simulated. |
 | 15 | Accounting (ACC) | 🟡 | Chart, journals with approval and reversal, trial balance, GL, reconciliation, period close. Account mappings are a simple field. Impairment not built (needs V-09, V-10). |
 | 16 | Reports (RPT) | 🟡 | All 42 SRS reports with filters and exports. Several are simplified, listed below. PDF is the browser's print-to-PDF. |
@@ -55,9 +55,11 @@ RPT-10 and RPT-11 default to the first loan (no loan picker). RPT-16 covers bran
 
 - Mock state is in server memory: it resets on restart and needs a single server process.
 - No end-of-day simulation, so accruals, DPD and penalties do not advance day by day beyond what is computed at read time and seeded.
+- Partial prepayment in the mock makes three assumptions the SRS does not settle, each to confirm with the business: amounts already due must be cleared first; the option is chosen per payment rather than configured per product (D-18); a prepayment can be reversed only while no later payment exists. Reducing-balance loans only: flat-rate and bullet loans need a contractual rule (V-01). No prepayment fee is charged.
 - Settlement in the mock adjusts future installments to clear the loan. FastAPI must post this properly.
 - Historical chart data derives from seed loans, so PAR spikes near the present are an artefact of the seed.
 - Account numbers use a simplified check digit in the mock.
+- Next.js instant-navigation validation is limited to segments that opt in (`validationLevel: "manual-warning"` in `next.config.ts`), because signed-in pages render only after client-side authentication.
 - Accessibility: built with labelled controls and keyboard-usable primitives. No axe audit or screen-reader test was run.
 - Khmer printing has not been tested on physical branch printers (AC-15).
 - `npm audit` reports moderate advisories from transitive dependencies; not reviewed.
@@ -72,7 +74,7 @@ RPT-10 and RPT-11 default to the first loan (no loan picker). RPT-16 covers bran
 | `verify:engine` (SRS E1–E14, KHR, leap year, IRR) | Pass |
 | `verify:api` (lifecycle and acceptance tests) | Pass |
 | Browser sweep of all routes as Owner | All render; no horizontal overflow at 1280 px |
-| UI walk-through: MFA sign-in, 8-step application wizard, repayment, allocation, receipt, required-reason rejection, Khmer | Pass |
+| UI walk-through: MFA sign-in, 8-step application wizard, partial prepayment, repayment, allocation, receipt, required-reason rejection, Khmer | Pass |
 | Screenshots: dashboard, loan, approvals, Khmer list, mobile 390 px | Reviewed |
 
 Not covered: real FastAPI integration, Playwright suite, load or security testing, cross-browser checks, and most SRS acceptance criteria (AC-02 onward) which require the backend.
